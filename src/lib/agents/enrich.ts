@@ -14,93 +14,131 @@ export interface EnrichedSources {
   };
 }
 
-const MAX_SESSION_RETRIES = 3;
+type PartialWebData = EnrichedSources["web"];
 
 export async function enrichProspect(
   prospect: RawProspect,
   _sources: string[],
-  onProgress?: (source: string, status: "running" | "done" | "error") => void
+  onProgress?: (source: string, status: "running" | "done" | "error") => void,
+  onPartialData?: (partial: PartialWebData) => Promise<void>
 ): Promise<EnrichedSources> {
   onProgress?.("web", "running");
+  const merged: PartialWebData = {};
+
   try {
-    const result = await enrichViaWebResearch(prospect);
+    // Mini-tâche 1 — profil de base (rôle, résumé, infos société)
+    const basic = await runMiniTask(prospect, buildBasicTask(prospect.name ?? "", prospect.company ?? ""), "basic");
+    Object.assign(merged, basic);
+    await onPartialData?.(merged);
+
+    // Mini-tâche 2 — recherche email/contact
+    const contact = await runMiniTask(prospect, buildContactTask(prospect.name ?? "", prospect.company ?? ""), "contact");
+    if (contact?.email) merged.email = contact.email;
+    if (contact?.phone) merged.phone = contact.phone;
+    await onPartialData?.(merged);
+
+    // Mini-tâche 3 — actualités / mentions récentes
+    const news = await runMiniTask(prospect, buildNewsTask(prospect.name ?? "", prospect.company ?? ""), "news");
+    if (news?.recent_mentions?.length) merged.recent_mentions = news.recent_mentions;
+    await onPartialData?.(merged);
+
     onProgress?.("web", "done");
-    return { web: result };
-  } catch {
+    return { web: merged };
+  } catch (err) {
+    console.error("[enrich error]", err);
     onProgress?.("web", "error");
-    return {};
+    return { web: merged };
   }
 }
 
-async function enrichViaWebResearch(prospect: RawProspect): Promise<EnrichedSources["web"]> {
-  const fallback = { summary: "", company_about: "", recent_mentions: [] };
-  const name = prospect.name ?? "Unknown";
-  const company = prospect.company ?? "";
+async function runMiniTask(
+  _prospect: RawProspect,
+  task: string,
+  label: string
+): Promise<PartialWebData> {
+  const session = await createSession();
+  try {
+    await navigateTo(session.sessionId, "https://www.google.com");
+    const raw = await runCuaOnKernel(session.sessionId, task);
+    console.log(`[enrich:${label}]`, raw?.slice(0, 300));
 
-  for (let attempt = 0; attempt < MAX_SESSION_RETRIES; attempt++) {
-    const session = await createSession();
-    try {
-      await navigateTo(session.sessionId, "https://www.google.com");
-      const task = buildResearchTask(name, company);
-      const raw = await runCuaOnKernel(session.sessionId, task);
-      console.log("[enrich web raw]", raw?.slice(0, 600));
-
-      // Bot Google détecté → nouvelle session
-      if (raw?.includes('"bot_detected"')) {
-        console.warn(`[enrich] Bot wall detected (attempt ${attempt + 1}), retrying with new session...`);
-        await deleteSession(session.sessionId).catch(() => null);
-        continue;
-      }
-
-      return parseJson(raw, fallback);
-    } catch (err) {
-      console.error(`[enrich web error] attempt ${attempt + 1}:`, String(err));
-    } finally {
-      await deleteSession(session.sessionId).catch(() => null);
+    if (raw?.includes('"bot_detected"')) {
+      console.warn(`[enrich:${label}] bot wall, skipping`);
+      return {};
     }
-  }
 
-  return fallback;
+    return parseJson<PartialWebData>(raw, {});
+  } catch (err) {
+    console.error(`[enrich:${label} error]`, String(err));
+    return {};
+  } finally {
+    await deleteSession(session.sessionId).catch(() => null);
+  }
 }
 
-function buildResearchTask(name: string, company: string): string {
-  return `You are an expert B2B researcher. Gather ALL possible public information about this person.
-Name: ${name}
-Company: ${company}
+function buildBasicTask(name: string, company: string): string {
+  return `You are a B2B researcher. Find basic professional information about this person.
+Name: ${name} | Company: ${company}
 
-CRITICAL RULES:
-- NEVER go to linkedin.com (requires login).
-- If you see a Google CAPTCHA, "unusual traffic", or any bot-detection page, immediately stop and output ONLY: {"bot_detected": true}
-- If you find an email or phone number anywhere, capture it.
-- After typing in any search box or address bar, press the Enter key to confirm.
-- You have at most 25 browser actions. After step 3, output the JSON immediately even if partial.
-- When ready to output results, stop taking actions and output ONLY the JSON — nothing else.
+RULES:
+- NEVER go to linkedin.com.
+- If you see a Google CAPTCHA or bot-detection page, output ONLY: {"bot_detected": true}
+- You have at most 12 browser actions total. Be efficient.
+- After typing in a search box or address bar, press Enter.
 
-STEP 1 — Click the Google search box, type "${name} ${company}", then press Enter to search.
-Read snippets + visit 2-3 top results (team page, press, blog).
-
-STEP 2 — Go back to Google (address bar → type google.com → Enter). Search for "${company}" → visit the official website → About/Team/Blog pages.
-
-STEP 3 — Go back to Google. Search for "${name} email contact ${company}" and press Enter. Look for any public email address in results.
-
-STEP 4 — Search for "${name} interview conference podcast" and press Enter. Visit any relevant result.
-
-STEP 5 — When done, return ONLY this JSON (no markdown, no code block):
+STEP 1 — Click the search box, type "${name} ${company}", press Enter.
+STEP 2 — Read the search result snippets. Visit 1 promising result (team page or company website).
+STEP 3 — Output this JSON immediately (no markdown):
 {
   "name": "${name}",
-  "role": "their exact job title",
+  "role": "job title or null",
   "company": "${company}",
-  "company_about": "what the company does in 1-2 sentences",
-  "email": "public email if found, else null",
-  "phone": "public phone if found, else null",
-  "summary": "professional summary 2-3 sentences",
-  "recent_mentions": ["source/activity 1", "source/activity 2", "source/activity 3"]
+  "company_about": "what the company does in 1-2 sentences or null",
+  "summary": "2-3 sentence professional bio or null",
+  "recent_mentions": []
+}`;
+}
+
+function buildContactTask(name: string, company: string): string {
+  return `You are a B2B researcher. Find contact information for this person.
+Name: ${name} | Company: ${company}
+
+RULES:
+- NEVER go to linkedin.com.
+- If you see a Google CAPTCHA or bot-detection page, output ONLY: {"bot_detected": true}
+- You have at most 10 browser actions. Be efficient.
+- After typing in a search box, press Enter.
+
+STEP 1 — Click the search box, type "${name} ${company} email contact", press Enter.
+STEP 2 — Scan results for any public email address or phone number.
+STEP 3 — Output this JSON immediately (no markdown):
+{
+  "email": "email@domain.com or null",
+  "phone": "phone number or null"
+}`;
+}
+
+function buildNewsTask(name: string, company: string): string {
+  return `You are a B2B researcher. Find recent public activities or mentions of this person.
+Name: ${name} | Company: ${company}
+
+RULES:
+- NEVER go to linkedin.com.
+- If you see a Google CAPTCHA or bot-detection page, output ONLY: {"bot_detected": true}
+- You have at most 10 browser actions. Be efficient.
+- After typing in a search box, press Enter.
+
+STEP 1 — Click the search box, type "${name} interview OR conference OR podcast OR article 2024 2025", press Enter.
+STEP 2 — Read the result snippets for relevant mentions.
+STEP 3 — Output this JSON immediately (no markdown):
+{
+  "recent_mentions": ["mention 1", "mention 2", "mention 3"]
 }`;
 }
 
 function parseJson<T>(raw: string, fallback: T): T {
   try {
-    const match = raw.match(/\{[\s\S]*\}/);
+    const match = raw?.match(/\{[\s\S]*\}/);
     if (!match) return fallback;
     return JSON.parse(match[0]) as T;
   } catch {

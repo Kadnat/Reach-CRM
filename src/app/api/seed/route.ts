@@ -27,9 +27,19 @@ async function enrichAndScore(
     { $set: { enrichment_status: "running", updated_at: new Date() } }
   );
 
-  const enriched = await enrichProspect(prospect, ["web"], (source, status) => {
-    addLog(db, runId, "enrich", `${prospect.name} — ${source}: ${status}`);
-  });
+  const enriched = await enrichProspect(
+    prospect,
+    ["web"],
+    (source, status) => {
+      addLog(db, runId, "enrich", `${prospect.name} — ${source}: ${status}`);
+    },
+    async (partial) => {
+      await db.collection("prospects").updateOne(
+        { _id: inserted.insertedId },
+        { $set: { "sources.web": partial, updated_at: new Date() } }
+      );
+    }
+  );
 
   await db.collection("prospects").updateOne(
     { _id: inserted.insertedId },
