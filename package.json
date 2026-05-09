@@ -1,0 +1,31 @@
+{
+  "name": "reach-crm",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@mistralai/mistralai": "^2.2.1",
+    "@onkernel/sdk": "^0.52.0",
+    "@tzafon/lightcone": "^0.14.0",
+    "eventsource-parser": "^3.0.8",
+    "mongodb": "^7.2.0",
+    "next": "16.2.6",
+    "openai": "^6.37.0",
+    "playwright-core": "^1.59.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "tailwindcss": "^4",
+    "typescript": "^6.0.3"
+  }
+}

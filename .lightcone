@@ -1,0 +1,9 @@
+curl -N -X POST "https://api.tzafon.ai/agent/tasks/stream" \
+    -H "Authorization: Bearer sk_30JROpnHGZVmzeb5Hlm4CrSkeIRXFJgO" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "agent_type": "harness",
+      "instruction": "go to tzafon.ai",
+      "stream_delta": true,
+      "mode": "tzafon.northstar-cua-fast-1.6"
+    }'
