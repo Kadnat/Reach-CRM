@@ -16,8 +16,10 @@ async function runPipeline(runId: string, icpId: string) {
     const { icp, company_pitch, sources_enabled } = icpDoc;
 
     // Step 1: discover
-    await addLog(db, runId, "discovery", "Starting prospect discovery...");
-    const rawProspects = await discoverProspects(icp, company_pitch);
+    await addLog(db, runId, "discovery", "Creating KERNEL browser session...");
+    const rawProspects = await discoverProspects(icp, company_pitch, (msg) =>
+      addLog(db, runId, "discovery", msg)
+    );
     await addLog(db, runId, "discovery", `Found ${rawProspects.length} prospects`);
 
     // Step 2: enrich + score each prospect
@@ -39,7 +41,15 @@ async function runPipeline(runId: string, icpId: string) {
         { $set: { enrichment_status: "running", updated_at: new Date() } }
       );
 
-      const enriched = await enrichProspect(prospect, sources_enabled);
+      const enriched = await enrichProspect(prospect, sources_enabled, (source, status) => {
+        addLog(db, runId, "enrich", `${prospect.name} — ${source}: ${status}`);
+        if (status === "done") {
+          db.collection("prospects").updateOne(
+            { _id: inserted.insertedId },
+            { $set: { [`sources.${source}_status`]: "done", updated_at: new Date() } }
+          );
+        }
+      });
 
       await db.collection("prospects").updateOne(
         { _id: inserted.insertedId },

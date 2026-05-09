@@ -1,4 +1,4 @@
-import { runCuaTask } from "@/lib/cua/tzafon";
+import { createSession, deleteSession, runCuaOnKernel } from "@/lib/cua/kernel";
 import { ICP } from "@/lib/agents/icp";
 
 export interface RawProspect {
@@ -10,34 +10,36 @@ export interface RawProspect {
   website_url?: string;
 }
 
-export async function discoverProspects(icp: ICP, companyPitch: string): Promise<RawProspect[]> {
-  const instruction = `You are a B2B sales researcher. Search Google and LinkedIn to find 5 real people who match this Ideal Customer Profile:
-
-Company context: ${companyPitch}
-Target roles: ${icp.roles.join(", ")}
-Industries: ${icp.industries.join(", ")}
-Company size: ${icp.company_size}
-Geography: ${icp.geography}
-
-Steps:
-1. Go to google.com
-2. Search for: site:linkedin.com/in "${icp.roles[0]}" "${icp.industries[0]}"
-3. Find 5 real profiles with name, company, role, and LinkedIn URL
-4. Return a JSON array like:
-[
-  {"name": "...", "company": "...", "role": "...", "linkedin_url": "https://linkedin.com/in/..."},
-  ...
-]
-
-IMPORTANT: Return ONLY the JSON array, nothing else.`;
-
-  const raw = await runCuaTask(instruction);
+export async function discoverProspects(
+  icp: ICP,
+  companyPitch: string,
+  onProgress?: (msg: string) => void
+): Promise<RawProspect[]> {
+  void companyPitch;
+  const session = await createSession();
+  onProgress?.(`KERNEL session created: ${session.sessionId}`);
 
   try {
+    const task = `Go to google.com and search for: "${icp.roles[0]}" "${icp.industries[0]}" site:linkedin.com/in
+
+From the Google search results page (do NOT navigate into any profile), collect the first 5 results that look like real LinkedIn profiles.
+For each result extract from the search snippet: full name, company name, job title, and LinkedIn URL.
+
+Return ONLY this JSON array, nothing else:
+[
+  {"name": "...", "company": "...", "role": "...", "linkedin_url": "https://linkedin.com/in/..."},
+  {"name": "...", "company": "...", "role": "...", "linkedin_url": "https://linkedin.com/in/..."}
+]`;
+
+    const raw = await runCuaOnKernel(session.sessionId, task, onProgress);
+
     const match = raw.match(/\[[\s\S]*\]/);
     if (!match) return [];
     return JSON.parse(match[0]) as RawProspect[];
-  } catch {
+  } catch (err) {
+    onProgress?.(`Discovery error: ${String(err)}`);
     return [];
+  } finally {
+    await deleteSession(session.sessionId).catch(() => null);
   }
 }
