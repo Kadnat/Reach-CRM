@@ -1,5 +1,7 @@
 # Reach CRM
 
+![Reach CRM](docs/screenshot.png)
+
 An AI-powered B2B prospect research tool. Give it your pitch and a few target names — it autonomously researches each person across the open web and returns enriched profiles ready to act on.
 
 ## What it does
