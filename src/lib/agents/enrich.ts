@@ -1,90 +1,101 @@
-import { createSession, deleteSession, runCuaOnKernel } from "@/lib/cua/kernel";
+import { createSession, deleteSession, navigateTo, runCuaOnKernel } from "@/lib/cua/kernel";
 import { RawProspect } from "@/lib/agents/discovery";
 
 export interface EnrichedSources {
-  linkedin?: { bio: string; last_posts: string[]; last_activity?: string };
-  twitter?: { bio: string; last_tweets: string[] };
-  website?: { about: string; tech_stack: string[]; open_positions: string[] };
+  web?: {
+    name?: string;
+    role?: string;
+    company?: string;
+    company_about?: string;
+    email?: string | null;
+    phone?: string | null;
+    summary?: string;
+    recent_mentions?: string[];
+  };
 }
+
+const MAX_SESSION_RETRIES = 3;
 
 export async function enrichProspect(
   prospect: RawProspect,
-  sources: string[],
+  _sources: string[],
   onProgress?: (source: string, status: "running" | "done" | "error") => void
 ): Promise<EnrichedSources> {
-  // One KERNEL session per source, run in parallel
-  const tasks: Promise<[string, unknown]>[] = [];
-
-  if (sources.includes("linkedin") && prospect.linkedin_url) {
-    tasks.push(
-      enrichWithKernel(
-        `Go to ${prospect.linkedin_url}. Extract bio/headline, last 3 posts summaries, last activity date.
-Return ONLY JSON: {"bio": "...", "last_posts": ["...", "...", "..."], "last_activity": "..."}`,
-        { bio: "", last_posts: [] },
-        () => onProgress?.("linkedin", "running"),
-        () => onProgress?.("linkedin", "done"),
-        (e) => onProgress?.("linkedin", "error")
-      ).then((d) => ["linkedin", d])
-    );
+  onProgress?.("web", "running");
+  try {
+    const result = await enrichViaWebResearch(prospect);
+    onProgress?.("web", "done");
+    return { web: result };
+  } catch {
+    onProgress?.("web", "error");
+    return {};
   }
-
-  if (sources.includes("twitter")) {
-    tasks.push(
-      enrichWithKernel(
-        `Go to twitter.com and search for "${prospect.name} ${prospect.company}". Find their profile.
-Extract bio and last 3 tweet summaries.
-Return ONLY JSON: {"bio": "...", "last_tweets": ["...", "...", "..."]}`,
-        { bio: "", last_tweets: [] },
-        () => onProgress?.("twitter", "running"),
-        () => onProgress?.("twitter", "done"),
-        (e) => onProgress?.("twitter", "error")
-      ).then((d) => ["twitter", d])
-    );
-  }
-
-  if (sources.includes("website") && prospect.website_url) {
-    tasks.push(
-      enrichWithKernel(
-        `Go to ${prospect.website_url}. Extract: about/mission text, tech stack clues, open job positions.
-Return ONLY JSON: {"about": "...", "tech_stack": ["..."], "open_positions": ["..."]}`,
-        { about: "", tech_stack: [], open_positions: [] },
-        () => onProgress?.("website", "running"),
-        () => onProgress?.("website", "done"),
-        (e) => onProgress?.("website", "error")
-      ).then((d) => ["website", d])
-    );
-  }
-
-  const results = await Promise.allSettled(tasks);
-  const enriched: EnrichedSources = {};
-  for (const r of results) {
-    if (r.status === "fulfilled") {
-      const [key, data] = r.value;
-      (enriched as Record<string, unknown>)[key] = data;
-    }
-  }
-  return enriched;
 }
 
-async function enrichWithKernel<T>(
-  task: string,
-  fallback: T,
-  onStart: () => void,
-  onDone: () => void,
-  onError: (e: unknown) => void
-): Promise<T> {
-  const session = await createSession();
-  onStart();
-  try {
-    const raw = await runCuaOnKernel(session.sessionId, task);
-    onDone();
-    return parseJson(raw, fallback);
-  } catch (err) {
-    onError(err);
-    return fallback;
-  } finally {
-    await deleteSession(session.sessionId).catch(() => null);
+async function enrichViaWebResearch(prospect: RawProspect): Promise<EnrichedSources["web"]> {
+  const fallback = { summary: "", company_about: "", recent_mentions: [] };
+  const name = prospect.name ?? "Unknown";
+  const company = prospect.company ?? "";
+
+  for (let attempt = 0; attempt < MAX_SESSION_RETRIES; attempt++) {
+    const session = await createSession();
+    try {
+      await navigateTo(session.sessionId, "https://www.google.com");
+      const task = buildResearchTask(name, company);
+      const raw = await runCuaOnKernel(session.sessionId, task);
+      console.log("[enrich web raw]", raw?.slice(0, 600));
+
+      // Bot Google détecté → nouvelle session
+      if (raw?.includes('"bot_detected"')) {
+        console.warn(`[enrich] Bot wall detected (attempt ${attempt + 1}), retrying with new session...`);
+        await deleteSession(session.sessionId).catch(() => null);
+        continue;
+      }
+
+      return parseJson(raw, fallback);
+    } catch (err) {
+      console.error(`[enrich web error] attempt ${attempt + 1}:`, String(err));
+    } finally {
+      await deleteSession(session.sessionId).catch(() => null);
+    }
   }
+
+  return fallback;
+}
+
+function buildResearchTask(name: string, company: string): string {
+  return `You are an expert B2B researcher. Gather ALL possible public information about this person.
+Name: ${name}
+Company: ${company}
+
+CRITICAL RULES:
+- NEVER go to linkedin.com (requires login).
+- If you see a Google CAPTCHA, "unusual traffic", or any bot-detection page, immediately stop and output ONLY: {"bot_detected": true}
+- If you find an email or phone number anywhere, capture it.
+- After typing in any search box or address bar, press the Enter key to confirm.
+- You have at most 25 browser actions. After step 3, output the JSON immediately even if partial.
+- When ready to output results, stop taking actions and output ONLY the JSON — nothing else.
+
+STEP 1 — Click the Google search box, type "${name} ${company}", then press Enter to search.
+Read snippets + visit 2-3 top results (team page, press, blog).
+
+STEP 2 — Go back to Google (address bar → type google.com → Enter). Search for "${company}" → visit the official website → About/Team/Blog pages.
+
+STEP 3 — Go back to Google. Search for "${name} email contact ${company}" and press Enter. Look for any public email address in results.
+
+STEP 4 — Search for "${name} interview conference podcast" and press Enter. Visit any relevant result.
+
+STEP 5 — When done, return ONLY this JSON (no markdown, no code block):
+{
+  "name": "${name}",
+  "role": "their exact job title",
+  "company": "${company}",
+  "company_about": "what the company does in 1-2 sentences",
+  "email": "public email if found, else null",
+  "phone": "public phone if found, else null",
+  "summary": "professional summary 2-3 sentences",
+  "recent_mentions": ["source/activity 1", "source/activity 2", "source/activity 3"]
+}`;
 }
 
 function parseJson<T>(raw: string, fallback: T): T {
