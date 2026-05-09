@@ -54,85 +54,92 @@ export async function enrichProspect(
 async function runMiniTask(
   _prospect: RawProspect,
   task: string,
-  label: string
+  label: string,
+  retries = 2
 ): Promise<PartialWebData> {
-  const session = await createSession();
-  try {
-    await navigateTo(session.sessionId, "https://www.google.com");
-    const raw = await runCuaOnKernel(session.sessionId, task);
-    console.log(`[enrich:${label}]`, raw?.slice(0, 300));
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const session = await createSession();
+    try {
+      await navigateTo(session.sessionId, "https://www.google.com");
+      const raw = await runCuaOnKernel(session.sessionId, task);
+      console.log(`[enrich:${label}]`, raw?.slice(0, 300));
 
-    if (raw?.includes('"bot_detected"')) {
-      console.warn(`[enrich:${label}] bot wall, skipping`);
-      return {};
+      // Bot/Cloudflare wall → nouvelle session
+      if (raw?.includes('"bot_detected"')) {
+        console.warn(`[enrich:${label}] wall detected attempt ${attempt + 1}, retrying...`);
+        await deleteSession(session.sessionId).catch(() => null);
+        continue;
+      }
+
+      return parseJson<PartialWebData>(raw, {});
+    } catch (err) {
+      console.error(`[enrich:${label} error] attempt ${attempt + 1}:`, String(err));
+      await deleteSession(session.sessionId).catch(() => null);
+      continue;
+    } finally {
+      await deleteSession(session.sessionId).catch(() => null);
     }
-
-    return parseJson<PartialWebData>(raw, {});
-  } catch (err) {
-    console.error(`[enrich:${label} error]`, String(err));
-    return {};
-  } finally {
-    await deleteSession(session.sessionId).catch(() => null);
   }
+  return {};
 }
 
 function buildBasicTask(name: string, company: string): string {
-  return `You are a B2B researcher. Find basic professional information about this person.
-Name: ${name} | Company: ${company}
+  return `You are a B2B web scraper. Your job: find professional info about a person by scraping as many public pages as possible.
+Target: ${name} — ${company}
 
-RULES:
-- NEVER go to linkedin.com.
-- If you see a Google CAPTCHA or bot-detection page, output ONLY: {"bot_detected": true}
-- You have at most 12 browser actions total. Be efficient.
-- After typing in a search box or address bar, press Enter.
+CRITICAL RULES:
+- NEVER go to linkedin.com (login wall).
+- If you hit a CAPTCHA, Cloudflare wall, or any access block: output {"bot_detected": true} immediately. Do NOT try to solve it.
+- After typing in any box, press Enter.
+- You have 15 actions max. Scrape fast and wide.
 
-STEP 1 — Click the search box, type "${name} ${company}", press Enter.
-STEP 2 — Read the search result snippets. Visit 1 promising result (team page or company website).
-STEP 3 — Output this JSON immediately (no markdown):
+STEP 1 — Search: click the search box, type "${name} ${company}", press Enter.
+STEP 2 — Visit 2-3 results: company team page, press articles, personal website, blog. Read and extract everything.
+STEP 3 — Output JSON now (no markdown, no code block):
 {
   "name": "${name}",
-  "role": "job title or null",
+  "role": "exact job title or null",
   "company": "${company}",
   "company_about": "what the company does in 1-2 sentences or null",
-  "summary": "2-3 sentence professional bio or null",
-  "recent_mentions": []
+  "summary": "professional bio 2-3 sentences from what you scraped or null",
+  "recent_mentions": ["any relevant activity, event, article found"]
 }`;
 }
 
 function buildContactTask(name: string, company: string): string {
-  return `You are a B2B researcher. Find contact information for this person.
-Name: ${name} | Company: ${company}
+  return `You are a B2B web scraper. Your job: find any public contact info for this person.
+Target: ${name} — ${company}
 
-RULES:
-- NEVER go to linkedin.com.
-- If you see a Google CAPTCHA or bot-detection page, output ONLY: {"bot_detected": true}
-- You have at most 10 browser actions. Be efficient.
-- After typing in a search box, press Enter.
+CRITICAL RULES:
+- NEVER go to linkedin.com (login wall).
+- If you hit a CAPTCHA, Cloudflare wall, or any access block: output {"bot_detected": true} immediately. Do NOT try to solve it.
+- After typing in any box, press Enter.
+- You have 12 actions max. Scrape fast.
 
-STEP 1 — Click the search box, type "${name} ${company} email contact", press Enter.
-STEP 2 — Scan results for any public email address or phone number.
-STEP 3 — Output this JSON immediately (no markdown):
+STEP 1 — Search: type "${name} ${company} email", press Enter. Scan snippets for email addresses.
+STEP 2 — Search: type "${name} ${company} contact", press Enter. Visit the company contact page if visible.
+STEP 3 — Output JSON now (no markdown):
 {
   "email": "email@domain.com or null",
-  "phone": "phone number or null"
+  "phone": "+33... or null"
 }`;
 }
 
 function buildNewsTask(name: string, company: string): string {
-  return `You are a B2B researcher. Find recent public activities or mentions of this person.
-Name: ${name} | Company: ${company}
+  return `You are a B2B web scraper. Your job: find any public mentions, activities or press about this person.
+Target: ${name} — ${company}
 
-RULES:
-- NEVER go to linkedin.com.
-- If you see a Google CAPTCHA or bot-detection page, output ONLY: {"bot_detected": true}
-- You have at most 10 browser actions. Be efficient.
-- After typing in a search box, press Enter.
+CRITICAL RULES:
+- NEVER go to linkedin.com (login wall).
+- If you hit a CAPTCHA, Cloudflare wall, or any access block: output {"bot_detected": true} immediately. Do NOT try to solve it.
+- After typing in any box, press Enter.
+- You have 12 actions max. Scrape fast and wide.
 
-STEP 1 — Click the search box, type "${name} interview OR conference OR podcast OR article 2024 2025", press Enter.
-STEP 2 — Read the result snippets for relevant mentions.
-STEP 3 — Output this JSON immediately (no markdown):
+STEP 1 — Search: type "${name} ${company}", press Enter. Look for press articles, interviews, events, podcasts in results.
+STEP 2 — Search: type "${name} site:crunchbase.com OR site:maddyness.com OR site:bfmtv.com OR site:lesechos.fr", press Enter. Scrape any relevant result.
+STEP 3 — Output JSON now (no markdown):
 {
-  "recent_mentions": ["mention 1", "mention 2", "mention 3"]
+  "recent_mentions": ["specific mention 1", "specific mention 2", "specific mention 3"]
 }`;
 }
 
